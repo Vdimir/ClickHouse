@@ -180,6 +180,7 @@ bool ParserInsertQuery::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
     if (table_function)
     {
         query->table_function = table_function;
+        query->partition_by = partition_by_expr;
     }
     else
     {
