@@ -8,8 +8,12 @@
 #include <Storages/StorageS3Settings.h>
 
 #include <Interpreters/Context.h>
+#include <Interpreters/ExpressionAnalyzer.h>
+#include <Interpreters/TreeRewriter.h>
 #include <Interpreters/evaluateConstantExpression.h>
+
 #include <Parsers/ASTLiteral.h>
+#include <Parsers/ASTInsertQuery.h>
 
 #include <IO/ReadBufferFromS3.h>
 #include <IO/ReadHelpers.h>
@@ -41,6 +45,11 @@
 #include <filesystem>
 
 namespace fs = std::filesystem;
+
+#include <boost/algorithm/string.hpp>
+
+
+static const String PARTITION_ID_WILDCARD = "{_partition_id}";
 
 namespace DB
 {
@@ -322,6 +331,137 @@ private:
 };
 
 
+class StorageS3PartitionedBlockOutputStream : public IBlockOutputStream
+{
+public:
+    StorageS3PartitionedBlockOutputStream(
+        const ASTPtr & partition_by,
+        const String & format_,
+        const Block & sample_block_,
+        ContextPtr context_,
+        const CompressionMethod compression_method_,
+        const std::shared_ptr<Aws::S3::S3Client> & client_,
+        const String & bucket_,
+        const String & key_,
+        size_t min_upload_part_size_,
+        size_t max_single_part_upload_size_)
+        : format(format_)
+        , sample_block(sample_block_)
+        , context(context_)
+        , compression_method(compression_method_)
+        , client(client_)
+        , bucket(bucket_)
+        , key(key_)
+        , min_upload_part_size(min_upload_part_size_)
+        , max_single_part_upload_size(max_single_part_upload_size_)
+    {
+        ASTPtr query = partition_by;
+        auto syntax_result = TreeRewriter(context).analyze(query, sample_block.getNamesAndTypesList());
+        partition_by_expr = ExpressionAnalyzer(query, syntax_result, context).getActions(false);
+        partition_by_column_name = partition_by->getColumnName();
+    }
+
+    Block getHeader() const override
+    {
+        return sample_block;
+    }
+
+    void write(const Block & block) override
+    {
+        Block current_block_with_partition_by_expr = block;
+        partition_by_expr->execute(current_block_with_partition_by_expr);
+
+        const auto & key_column = current_block_with_partition_by_expr.getByName(partition_by_column_name);
+
+        std::unordered_map<String, size_t> sub_blocks_indices;
+        IColumn::Selector selector;
+        for (size_t row = 0; row < block.rows(); ++row)
+        {
+            auto & value = (*key_column.column)[row].get<String>();
+            auto [it, inserted] = sub_blocks_indices.emplace(value, sub_blocks_indices.size());
+            selector.push_back(it->second);
+        }
+
+        Blocks sub_blocks(sub_blocks_indices.size(), block.cloneEmpty());
+        for (size_t column_index = 0; column_index < block.columns(); ++column_index)
+        {
+            const auto & column = block.getByPosition(column_index);
+            MutableColumns sub_columns = column.column->scatter(sub_blocks.size(), selector);
+            for (size_t sub_column = 0; sub_column < sub_columns.size(); ++sub_column)
+            {
+                sub_blocks[sub_column].getByPosition(column_index).column = std::move(sub_columns[sub_column]);
+            }
+        }
+
+        for (const auto & [partition_id, index] : sub_blocks_indices)
+        {
+            writers[partition_id]->write(sub_blocks[index]);
+        }
+    }
+
+    void writePrefix() override
+    {
+    }
+
+    void flush() override
+    {
+        for (auto & [partition_id, writer] : writers)
+        {
+            writer->flush();
+        }
+    }
+
+    void writeSuffix() override
+    {
+        for (auto & [partition_id, writer] : writers)
+        {
+            writer->writeSuffix();
+        }
+    }
+
+private:
+    const String format;
+    const Block sample_block;
+    ContextPtr context;
+    const CompressionMethod compression_method;
+    std::shared_ptr<Aws::S3::S3Client> client;
+    const String bucket;
+    const String key;
+    size_t min_upload_part_size;
+    size_t max_single_part_upload_size;
+
+    ExpressionActionsPtr partition_by_expr;
+    String partition_by_column_name;
+
+    std::unordered_map<String, BlockOutputStreamPtr> writers;
+
+    static String replaceWildcards(const String & input, const String & partition_id)
+    {
+        return boost::replace_all_copy(input, PARTITION_ID_WILDCARD, partition_id);
+    }
+
+    BlockOutputStreamPtr getWriterForPartition(const String & partition_id)
+    {
+        if (writers.count(partition_id) == 0)
+        {
+            writers.emplace(partition_id, std::make_shared<StorageS3BlockOutputStream>(
+                format,
+                sample_block,
+                context,
+                compression_method,
+                client,
+                replaceWildcards(bucket, partition_id),
+                replaceWildcards(key, partition_id),
+                min_upload_part_size,
+                max_single_part_upload_size
+            )).first->second->writePrefix();
+        }
+
+        return writers[partition_id];
+    }
+};
+
+
 StorageS3::StorageS3(
     const S3::URI & uri_,
     const String & access_key_id_,
@@ -421,19 +561,41 @@ Pipe StorageS3::read(
     return pipe;
 }
 
-BlockOutputStreamPtr StorageS3::write(const ASTPtr & /*query*/, const StorageMetadataPtr & metadata_snapshot, ContextPtr local_context)
+BlockOutputStreamPtr StorageS3::write(const ASTPtr & query, const StorageMetadataPtr & metadata_snapshot, ContextPtr local_context)
 {
     updateClientAndAuthSettings(local_context, client_auth);
-    return std::make_shared<StorageS3BlockOutputStream>(
-        format_name,
-        metadata_snapshot->getSampleBlock(),
-        local_context,
-        chooseCompressionMethod(client_auth.uri.key, compression_method),
-        client_auth.client,
-        client_auth.uri.bucket,
-        client_auth.uri.key,
-        min_upload_part_size,
-        max_single_part_upload_size);
+
+    auto sample_block = metadata_snapshot->getSampleBlock();
+    auto chosen_compression_method = chooseCompressionMethod(client_auth.uri.key, compression_method);
+    bool has_wildcards = client_auth.uri.bucket.find(PARTITION_ID_WILDCARD) != String::npos || client_auth.uri.key.find(PARTITION_ID_WILDCARD) != String::npos;
+    auto insert_query = std::static_pointer_cast<ASTInsertQuery>(query);
+    if (insert_query->partition_by && has_wildcards)
+    {
+        return std::make_shared<StorageS3PartitionedBlockOutputStream>(
+            insert_query->partition_by,
+            format_name,
+            sample_block,
+            local_context,
+            chosen_compression_method,
+            client_auth.client,
+            client_auth.uri.bucket,
+            client_auth.uri.key,
+            min_upload_part_size,
+            max_single_part_upload_size);
+    }
+    else
+    {
+        return std::make_shared<StorageS3BlockOutputStream>(
+            format_name,
+            sample_block,
+            local_context,
+            chosen_compression_method,
+            client_auth.client,
+            client_auth.uri.bucket,
+            client_auth.uri.key,
+            min_upload_part_size,
+            max_single_part_upload_size);
+    }
 }
 
 
