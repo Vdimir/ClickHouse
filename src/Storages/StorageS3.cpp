@@ -2,6 +2,8 @@
 
 #if USE_AWS_S3
 
+#include <Columns/ColumnString.h>
+
 #include <IO/S3Common.h>
 #include <Storages/StorageFactory.h>
 #include <Storages/StorageS3.h>
@@ -371,17 +373,18 @@ public:
         Block current_block_with_partition_by_expr = block;
         partition_by_expr->execute(current_block_with_partition_by_expr);
 
-        const auto & key_column = current_block_with_partition_by_expr.getByName(partition_by_column_name);
+        const auto * key_column = checkAndGetColumn<ColumnString>(current_block_with_partition_by_expr.getByName(partition_by_column_name).column.get());
 
         std::unordered_map<String, size_t> sub_blocks_indices;
         IColumn::Selector selector;
         for (size_t row = 0; row < block.rows(); ++row)
         {
-            auto & value = (*key_column.column)[row].get<String>();
+            auto value = key_column->getDataAt(row);
             auto [it, inserted] = sub_blocks_indices.emplace(value, sub_blocks_indices.size());
             selector.push_back(it->second);
         }
 
+        LOG_DEBUG(&Poco::Logger::get("StorageS3PartitionedBlockOutputStream"), "111111");
         Blocks sub_blocks(sub_blocks_indices.size(), block.cloneEmpty());
         for (size_t column_index = 0; column_index < block.columns(); ++column_index)
         {
@@ -393,9 +396,10 @@ public:
             }
         }
 
+        LOG_DEBUG(&Poco::Logger::get("StorageS3PartitionedBlockOutputStream"), "222222");
         for (const auto & [partition_id, index] : sub_blocks_indices)
         {
-            writers[partition_id]->write(sub_blocks[index]);
+            getWriterForPartition(partition_id)->write(sub_blocks[index]);
         }
     }
 
