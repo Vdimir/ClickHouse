@@ -390,7 +390,6 @@ public:
             selector.push_back(it->second);
         }
 
-        LOG_DEBUG(&Poco::Logger::get("StorageS3PartitionedBlockOutputStream"), "111111");
         Blocks sub_blocks(sub_blocks_indices.size(), block.cloneEmpty());
         for (size_t column_index = 0; column_index < block.columns(); ++column_index)
         {
@@ -402,7 +401,6 @@ public:
             }
         }
 
-        LOG_DEBUG(&Poco::Logger::get("StorageS3PartitionedBlockOutputStream"), "222222");
         for (const auto & [partition_id, index] : sub_blocks_indices)
         {
             getWriterForPartition(partition_id)->write(sub_blocks[index]);
@@ -411,6 +409,8 @@ public:
 
     void writePrefix() override
     {
+        /// `writePrefix()` for each child writer is called in `getWriterForPartition()`
+        /// on writer creation.
     }
 
     void flush() override
