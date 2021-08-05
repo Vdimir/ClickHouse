@@ -14,7 +14,7 @@
 
 #include <utility>
 #include <memory>
-
+#include <deque>
 
 namespace DB
 {
@@ -44,6 +44,7 @@ class TableJoin
 
 public:
     using NameToTypeMap = std::unordered_map<String, DataTypePtr>;
+    using Disjuncts = std::deque<const ASTPtr>;
 
 private:
     /** Query of the form `SELECT expr(x) AS k FROM t1 ANY LEFT JOIN (SELECT expr(x) AS k FROM t2) USING k`
@@ -77,7 +78,7 @@ private:
     ASTsVector on_filter_condition_asts_right;
 private:
     size_t disjunct_num = 0;
-    std::vector<const ASTPtr> disjuncts;
+    Disjuncts disjuncts;
 
     ASTs key_asts_left;
     ASTs key_asts_right;
@@ -170,7 +171,7 @@ public:
 
     void resetCollected();
     void addUsingKey(const ASTPtr & ast);
-    void setDisjuncts(std::vector<const ASTPtr>&&);
+    void setDisjuncts(Disjuncts &&);
     void addDisjunct(const ASTPtr &);
     void addOnKeys(ASTPtr & left_table_ast, ASTPtr & right_table_ast);
 
