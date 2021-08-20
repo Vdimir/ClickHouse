@@ -113,6 +113,12 @@ private:
     ActionsDAGPtr applyKeyConvertToTable(
         const ColumnsWithTypeAndName & cols_src, const NameToTypeMap & type_mapping, NamesVector & names_vector_to_rename) const;
 
+    void leftToRightKeyRemap(
+        const Names & left_keys,
+        const Names & right_keys,
+        const NameSet & required_right_keys,
+        std::unordered_map<String, String> & key_map) const;
+
 public:
     TableJoin()
         : key_names_left(1)
