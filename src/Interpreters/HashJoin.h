@@ -328,7 +328,7 @@ public:
 
         std::vector<MapsVariant> maps;
         Block sample_block; /// Block as it would appear in the BlockList
-        BlocksList blocks;
+        BlocksList blocks; /// Blocks of "right" table.
         BlockNullmapList blocks_nullmaps; /// Nullmaps for blocks of "right" table (if needed)
 
         /// Additional data - strings for string keys and continuation elements of single-linked lists of references to rows.
@@ -362,10 +362,6 @@ private:
 
     /// This join was created from StorageJoin and it is already filled.
     bool from_storage_join = false;
-
-    /// Names of key columns in right-side table (in the order they appear in ON/USING clause). @note It could contain duplicates.
-    const NamesVector key_names_right;
-    const NamesVector key_names_left;
 
     bool nullable_right_side; /// In case of LEFT and FULL joins, if use_nulls, convert right-side columns to Nullable.
     bool nullable_left_side; /// In case of RIGHT and FULL joins, if use_nulls, convert left-side columns to Nullable.
@@ -417,10 +413,7 @@ private:
     void initRightBlockStructure(Block & saved_block_sample);
 
     template <ASTTableJoin::Kind KIND, ASTTableJoin::Strictness STRICTNESS>
-    void joinBlockImpl(
-        Block & block,
-        std::unique_ptr<AddedColumns>,
-        size_t existing_columns) const;
+    void joinBlockImpl(Block & block, std::unique_ptr<AddedColumns>) const;
 
     template <ASTTableJoin::Kind KIND, ASTTableJoin::Strictness STRICTNESS, typename Maps>
     std::unique_ptr<AddedColumns> makeAddedColumns(
@@ -442,14 +435,10 @@ private:
 
     void joinBlockImplCross(Block & block, ExtraBlockPtr & not_processed) const;
 
-    // template <typename Maps>
-    // ColumnWithTypeAndName joinGetImpl(const Block & block, const Block & block_with_columns_to_add, const Maps & maps_, HashJoin::Type) const;
-
     static Type chooseMethod(const ColumnRawPtrs & key_columns, Sizes & key_sizes);
 
     bool empty() const;
     bool overDictionary() const;
 };
-
 
 }
