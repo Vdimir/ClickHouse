@@ -306,7 +306,8 @@ bool TableJoin::sameStrictnessAndKind(ASTTableJoin::Strictness strictness_, ASTT
 
 bool TableJoin::oneDisjunct() const
 {
-    return clauses.size() <= 1;
+    assert(clauses.size() > 0);
+    return clauses.size() == 1;
 }
 
 bool TableJoin::allowMergeJoin() const
@@ -556,6 +557,17 @@ std::unordered_map<String, String> TableJoin::leftToRightKeyRemap() const
         });
     }
     return left_to_right_key_remap;
+}
+
+Names TableJoin::getAllNames(JoinTableSide side) const
+{
+    Names res;
+    forAllKeys(clauses, [&res, side](const auto & left, const auto & right)
+    {
+        res.emplace_back(side == JoinTableSide::Left ? left : right);
+        return true;
+    });
+    return res;
 }
 
 }

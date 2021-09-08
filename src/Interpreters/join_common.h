@@ -12,7 +12,9 @@ namespace DB
 struct ColumnWithTypeAndName;
 class TableJoin;
 class IColumn;
+
 using ColumnRawPtrs = std::vector<const IColumn *>;
+using ColumnRawPtrMap = std::unordered_map<String, const IColumn *>;
 using UInt8ColumnDataPtr = const ColumnUInt8::Container *;
 using UInt8ColumnDataPtrVector = std::vector<UInt8ColumnDataPtr>;
 
@@ -29,6 +31,7 @@ ColumnPtr emptyNotNullableClone(const ColumnPtr & column);
 ColumnPtr materializeColumn(const Block & block, const String & name);
 Columns materializeColumns(const Block & block, const Names & names);
 ColumnRawPtrs materializeColumnsInplace(Block & block, const Names & names);
+ColumnRawPtrMap materializeColumnsInplaceMap(Block & block, const Names & names);
 ColumnRawPtrs getRawPointers(const Columns & columns);
 void removeLowCardinalityInplace(Block & block);
 void removeLowCardinalityInplace(Block & block, const Names & names, bool change_type = true);

@@ -157,6 +157,11 @@ private:
         key_asts_right.emplace_back(right_ast ? right_ast : left_ast);
     }
 
+    void assertHasOneOnExpr() const
+    {
+        if (!oneDisjunct())
+            throw DB::Exception(ErrorCodes::LOGICAL_ERROR, "Expected to have only one join clause, got {}", clauses.size());
+    }
 
 public:
     TableJoin() : clauses(1)
@@ -209,17 +214,13 @@ public:
 
     bool oneDisjunct() const;
 
-    JoinOnClause & getOnlyClause()
-    {
-        if (clauses.size() != 1)
-            throw DB::Exception(ErrorCodes::LOGICAL_ERROR, "Expected to have only one join clause, got {}", clauses.size());
-        return clauses.back();
-    }
+    JoinOnClause & getOnlyClause() { assertHasOneOnExpr(); return clauses[0]; }
+    const JoinOnClause & getOnlyClause() const { assertHasOneOnExpr(); return clauses[0]; }
 
-    std::vector<JoinOnClause> & getClauses()
-    {
-        return clauses;
-    }
+    std::vector<JoinOnClause> & getClauses() { return clauses; }
+    const std::vector<JoinOnClause> & getClauses() const { return clauses; }
+
+    Names getAllNames(JoinTableSide side) const;
 
     void resetCollected();
     void addUsingKey(const ASTPtr & ast);
@@ -241,8 +242,6 @@ public:
      *     doesn't supported yet, it can be added later.
      */
     void addJoinCondition(const ASTPtr & ast, bool is_left);
-    ASTPtr joinConditionColumn(JoinTableSide side, size_t disjunct_num) const;
-    std::pair<String, String> joinConditionColumnNames(size_t disjunct_num) const;
 
     bool hasUsing() const { return table_join.using_expression_list != nullptr; }
     bool hasOn() const { return table_join.on_expression != nullptr; }
@@ -279,26 +278,6 @@ public:
 
     ASTPtr leftKeysList() const;
     ASTPtr rightKeysList() const; /// For ON syntax only
-
-    NamesVector keyNamesLeft() const
-    {
-        NamesVector key_names;
-        for (const auto & clause : clauses)
-        {
-            key_names.push_back(clause.key_names_left);
-        }
-        return key_names;
-    }
-
-    NamesVector keyNamesRight() const
-    {
-        NamesVector key_names;
-        for (const auto & clause : clauses)
-        {
-            key_names.push_back(clause.key_names_right);
-        }
-        return key_names;
-    }
 
     const NamesAndTypesList & columnsFromJoinedTable() const { return columns_from_joined_table; }
     Names columnsAddedByJoin() const

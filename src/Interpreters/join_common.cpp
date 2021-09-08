@@ -1,3 +1,4 @@
+#include <unordered_map>
 #include <Interpreters/join_common.h>
 
 #include <Columns/ColumnLowCardinality.h>
@@ -273,6 +274,21 @@ ColumnRawPtrs materializeColumnsInplace(Block & block, const Names & names)
         auto & column = block.getByName(column_name).column;
         column = recursiveRemoveLowCardinality(column->convertToFullColumnIfConst());
         ptrs.push_back(column.get());
+    }
+
+    return ptrs;
+}
+
+ColumnRawPtrMap materializeColumnsInplaceMap(Block & block, const Names & names)
+{
+    ColumnRawPtrMap ptrs;
+    ptrs.reserve(names.size());
+
+    for (const auto & column_name : names)
+    {
+        auto & column = block.getByName(column_name).column;
+        column = recursiveRemoveLowCardinality(column->convertToFullColumnIfConst());
+        ptrs[column_name] = column.get();
     }
 
     return ptrs;
