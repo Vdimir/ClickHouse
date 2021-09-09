@@ -329,8 +329,9 @@ HashJoin::HashJoin(std::shared_ptr<TableJoin> table_join_, const Block & right_s
             /// However, this does not depend on the size of the asof join key (as that goes into the BST)
             /// Therefore, add it back in such that it can be extracted appropriately from the full stored
             /// key_columns and key_sizes
-            key_sizes.resize(1);
-            key_sizes[0].push_back(asof_size);
+            auto & asof_key_sizes = key_sizes.emplace_back();
+            data->type = chooseMethod(key_columns, asof_key_sizes);
+            asof_key_sizes.push_back(asof_size);
         }
         else
         {
@@ -935,9 +936,9 @@ public:
         if (is_asof_join)
         {
             assert(join_on_keys.size() == 1);
-            const auto & right_asof_column = join.savedBlockSample().getByName(join_on_keys[0].key_names.front());
+            const ColumnWithTypeAndName & right_asof_column = join.rightAsofKeyColumn();
             addColumn(right_asof_column, right_asof_column.name);
-            left_asof_key = join_on_keys[0].key_columns.front();
+            left_asof_key = join_on_keys[0].key_columns.back();
         }
 
         for (auto & tn : type_name)
@@ -2017,4 +2018,11 @@ void HashJoin::reuseJoinedData(const HashJoin & join)
         });
     }
 }
+
+const ColumnWithTypeAndName & HashJoin::rightAsofKeyColumn() const
+{
+    /// It should be nullable if nullable_right_side is true
+    return savedBlockSample().getByName(table_join->getOnlyClause().key_names_right.back());
+}
+
 }
