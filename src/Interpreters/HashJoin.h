@@ -1,28 +1,24 @@
 #pragma once
 
-#include <variant>
+#include <deque>
 #include <optional>
 #include <shared_mutex>
-#include <deque>
+#include <variant>
 #include <vector>
-
-#include <Parsers/ASTTablesInSelectQuery.h>
-
-#include <Interpreters/IJoin.h>
-#include <Interpreters/AggregationCommon.h>
-#include <Interpreters/RowRefs.h>
 
 #include <Common/Arena.h>
 #include <Common/ColumnsHashing.h>
-#include <Common/HashTable/HashMap.h>
 #include <Common/HashTable/FixedHashMap.h>
-
-#include <Columns/ColumnString.h>
-#include <Columns/ColumnFixedString.h>
-
-#include <DataStreams/SizeLimits.h>
+#include <Common/HashTable/HashMap.h>
 
 #include <Core/Block.h>
+
+#include <Interpreters/AggregationCommon.h>
+#include <Interpreters/IJoin.h>
+#include <Interpreters/RowRefs.h>
+
+#include <Parsers/ASTTablesInSelectQuery.h>
+
 
 namespace DB
 {

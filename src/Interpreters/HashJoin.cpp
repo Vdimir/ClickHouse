@@ -1,9 +1,8 @@
 #include <any>
-#include <limits>
-#include <unordered_map>
-#include <vector>
 
-#include <common/logger_useful.h>
+#include <Core/ColumnNumbers.h>
+#include <Common/typeid_cast.h>
+#include <Common/assert_cast.h>
 
 #include <Columns/ColumnConst.h>
 #include <Columns/ColumnString.h>
@@ -14,6 +13,8 @@
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypeLowCardinality.h>
 
+#include <DataStreams/materializeBlock.h>
+
 #include <Interpreters/HashJoin.h>
 #include <Interpreters/join_common.h>
 #include <Interpreters/TableJoin.h>
@@ -22,15 +23,6 @@
 #include <Interpreters/DictionaryReader.h>
 
 #include <Storages/StorageDictionary.h>
-
-#include <DataStreams/materializeBlock.h>
-
-#include <Core/ColumnNumbers.h>
-#include <fmt/core.h>
-#include <fmt/format.h>
-#include <Common/typeid_cast.h>
-#include <Common/assert_cast.h>
-#include "Columns/IColumn.h"
 
 #include <common/logger_useful.h>
 
@@ -234,19 +226,6 @@ static ColumnWithTypeAndName correctNullability(ColumnWithTypeAndName && column,
     return std::move(column);
 }
 
-//static std::string formatKeysDebug(const std::vector<TableJoin::JoinOnClause> & onexprs)
-//{
-//    std::vector<std::string> res;
-//    for (const auto & onexpr : onexprs)
-//    {
-//        std::vector<std::string> current;
-//        for (size_t i = 0; i < onexpr.keysCount(); ++i)
-//            current.emplace_back(fmt::format("{} == {}", onexpr.key_names_left[i], onexpr.key_names_right[i]));
-//        res.emplace_back(fmt::format("{}", fmt::join(current, ", ")));
-//    }
-//    return fmt::format("{}", fmt::join(res, " | "));
-//}
-
 HashJoin::HashJoin(std::shared_ptr<TableJoin> table_join_, const Block & right_sample_block_, bool any_take_last_row_)
     : table_join(table_join_)
     , kind(table_join->kind())
@@ -260,6 +239,7 @@ HashJoin::HashJoin(std::shared_ptr<TableJoin> table_join_, const Block & right_s
     , log(&Poco::Logger::get("HashJoin"))
 {
     LOG_DEBUG(log, "Right sample block: {}", right_sample_block.dumpStructure());
+
     if (!table_join->oneDisjunct())
     {
         /// required right keys concept does not work well if multiple disjuncts,
@@ -273,8 +253,15 @@ HashJoin::HashJoin(std::shared_ptr<TableJoin> table_join_, const Block & right_s
         required_right_keys = table_join->getRequiredRightKeys(right_table_keys, required_right_keys_sources);
     }
 
-//    LOG_DEBUG(log, "Join keys: [{}], required right: [{}]", formatKeysDebug(table_join->getClauses()), fmt::join(required_right_keys.getNames(), ", "));
-    LOG_DEBUG(log, "Columns to add: [{}]", sample_block_with_columns_to_add.dumpStructure());
+    LOG_TRACE(log, "Columns to add: [{}], required right [{}]",
+              sample_block_with_columns_to_add.dumpStructure(),
+              fmt::join(required_right_keys.getNames(), ", "));
+    {
+        std::vector<String> log_text;
+        for (const auto & clause : table_join->getClauses())
+            log_text.push_back(clause.formatDebug());
+        LOG_TRACE(log, "Joining on: {}", fmt::join(log_text, " | "));
+    }
 
     JoinCommon::removeLowCardinalityInplace(right_table_keys);
 

@@ -1,6 +1,5 @@
 #include <Interpreters/TableJoin.h>
 
-
 #include <Common/StringUtils/StringUtils.h>
 
 #include <Core/Block.h>
@@ -30,8 +29,9 @@ namespace DB
 
 namespace ErrorCodes
 {
-    extern const int TYPE_MISMATCH;
     extern const int LOGICAL_ERROR;
+    extern const int NOT_IMPLEMENTED;
+    extern const int TYPE_MISMATCH;
 }
 
 namespace
@@ -50,7 +50,6 @@ std::string formatTypeMap(const TableJoin::NameToTypeMap & target, const TableJo
 }
 
 }
-
 
 namespace
 {
@@ -453,6 +452,12 @@ bool TableJoin::tryInitDictJoin(const Block & sample_block, ContextPtr context)
     return true;
 }
 
+static void tryRename(String & name, const NameToNameMap & renames)
+{
+    if (const auto it = renames.find(name); it != renames.end())
+        name = it->second;
+}
+
 std::pair<ActionsDAGPtr, ActionsDAGPtr>
 TableJoin::createConvertingActions(const ColumnsWithTypeAndName & left_sample_columns, const ColumnsWithTypeAndName & right_sample_columns)
 {
@@ -462,12 +467,11 @@ TableJoin::createConvertingActions(const ColumnsWithTypeAndName & left_sample_co
     NameToNameMap right_key_column_rename;
     auto left_converting_actions = applyKeyConvertToTable(left_sample_columns, left_type_map, left_key_column_rename);
     auto right_converting_actions = applyKeyConvertToTable(right_sample_columns, right_type_map, right_key_column_rename);
+
     forAllKeys(clauses, [&](auto & left_key, auto & right_key)
     {
-        if (const auto it = left_key_column_rename.find(left_key); it != left_key_column_rename.end())
-            left_key = it->second;
-        if (const auto it = right_key_column_rename.find(left_key); it != right_key_column_rename.end())
-            right_key = it->second;
+        tryRename(left_key, left_key_column_rename);
+        tryRename(right_key, right_key_column_rename);
         return true;
     });
 
@@ -603,7 +607,7 @@ static void addJoinConditionWithAnd(ASTPtr & current_cond, const ASTPtr & new_co
     }
     else
     {
-        /// already have some condition, unite coditions with `and`
+        /// already have some conditions, unite it with `and`
         current_cond = makeASTFunction("and", current_cond, new_cond);
     }
 }
