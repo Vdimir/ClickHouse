@@ -285,7 +285,6 @@ HashJoin::HashJoin(std::shared_ptr<TableJoin> table_join_, const Block & right_s
     if (nullable_right_side)
         JoinCommon::convertColumnsToNullable(sample_block_with_columns_to_add);
 
-
     size_t disjuncts_num = table_join->getClauses().size();
     data->maps.resize(disjuncts_num);
     key_sizes.reserve(disjuncts_num);
@@ -295,7 +294,7 @@ HashJoin::HashJoin(std::shared_ptr<TableJoin> table_join_, const Block & right_s
         const auto & key_names_right = clause.key_names_right;
         ColumnRawPtrs key_columns = JoinCommon::extractKeysForJoin(right_table_keys, key_names_right);
 
-        if (table_join->dictionary_reader)
+        if (table_join->getDictionaryReader())
         {
             assert(disjuncts_num == 1);
             LOG_DEBUG(log, "Performing join over dict");
@@ -433,7 +432,8 @@ public:
 
     KeyGetterForDict(const TableJoin & table_join, const ColumnRawPtrs & key_columns)
     {
-        table_join.dictionary_reader->readKeys(*key_columns[0], read_result, found, positions);
+        assert(table_join.getDictionaryReader());
+        table_join.getDictionaryReader()->readKeys(*key_columns[0], read_result, found, positions);
 
         for (ColumnWithTypeAndName & column : read_result)
             if (table_join.rightBecomeNullable(column.type))
