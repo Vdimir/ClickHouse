@@ -51,7 +51,6 @@ public:
         void addJoinKeys(const ASTPtr & left_ast, const ASTPtr & right_ast, JoinIdentifierPosPair table_pos);
         void addAsofJoinKeys(const ASTPtr & left_ast, const ASTPtr & right_ast, JoinIdentifierPosPair table_pos,
                              const ASOF::Inequality & asof_inequality);
-        void setDisjuncts(const ASTPtr & or_func_ast);
         void asofToJoinKeys();
     };
 
@@ -74,7 +73,7 @@ public:
     static bool needChildVisit(const ASTPtr & node, const ASTPtr &)
     {
         if (auto * func = node->as<ASTFunction>())
-            return func->name == "and" || func->name == "or";
+            return func->name == "and";
         return true;
     }
 

@@ -32,15 +32,6 @@ bool isRightIdentifier(JoinIdentifierPos pos)
 
 }
 
-void CollectJoinOnKeysMatcher::Data::setDisjuncts(const ASTPtr & or_func_ast)
-{
-    const auto * func = or_func_ast->as<ASTFunction>();
-    const auto * func_args = func->arguments->as<ASTExpressionList>();
-    TableJoin::Disjuncts v = func_args->children;
-
-    analyzed_join.setDisjuncts(std::move(v));
-}
-
 void CollectJoinOnKeysMatcher::Data::addJoinKeys(const ASTPtr & left_ast, const ASTPtr & right_ast, JoinIdentifierPosPair table_pos)
 {
     ASTPtr left = left_ast->clone();
@@ -96,14 +87,6 @@ void CollectJoinOnKeysMatcher::visit(const ASTIdentifier & ident, const ASTPtr &
 
 void CollectJoinOnKeysMatcher::visit(const ASTFunction & func, const ASTPtr & ast, Data & data)
 {
-    if (func.name == "or")
-    {
-        data.setDisjuncts(ast);
-        return;
-    }
-
-    data.analyzed_join.addDisjunct(ast);
-
     if (func.name == "and")
         return; /// go into children
 

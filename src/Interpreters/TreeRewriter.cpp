@@ -507,185 +507,6 @@ void setJoinStrictness(ASTSelectQuery & select_query, JoinStrictness join_defaul
     out_table_join = table_join;
 }
 
-class DNF
-{
-    bool node_added = false;
-
-    void normTree(ASTPtr node)
-    {
-        auto * func = node->as<ASTFunction>();
-        if (func && func->children.size() == 1)
-        {
-            for (bool touched = true; touched;)
-            {
-                touched = false;
-
-                ASTs new_children;
-                const auto * func_args = func->arguments->as<ASTExpressionList>();
-                for (const auto & child : func_args->children)
-                {
-                    auto * child_func = child->as<ASTFunction>();
-                    if (child_func && func->children.size() == 1
-                        && ((func->name == "or" && child_func->name == "or") || (func->name == "and" && child_func->name == "and")))
-                    {
-                        std::copy(child_func->arguments->children.begin(),
-                            child_func->arguments->children.end(),
-                            std::back_inserter(new_children));
-                        touched = true;
-                    }
-                    else
-                    {
-                        new_children.push_back(child);
-                    }
-                }
-
-                func->arguments->children = std::move(new_children);
-            }
-
-            for (auto & child : func->arguments->children)
-            {
-                normTree(child);
-            }
-        }
-        // LOG_TRACE(&Poco::Logger::get("TreeRewrite"), "bottom of normTree:  {}", node->dumpTree());
-    }
-
-    ASTPtr distribute(ASTPtr node)
-    {
-        const auto * function = node->as<ASTFunction>();
-
-        if (function && function->children.size() == 1)
-        {
-            if (function->name == "and")
-            {
-                const auto * func_args = function->arguments->as<ASTExpressionList>();
-                if (!func_args)
-                {
-                    return node;
-                }
-
-                auto or_child = std::find_if(func_args->children.begin(), func_args->children.end(), [](ASTPtr arg)
-                    {
-                        const auto * f = arg->as<ASTFunction>();
-                        return f && f->name == "or" && f->children.size() == 1;
-                    });
-                if (or_child == func_args->children.end())
-                {
-                    return node;
-                }
-
-                ASTs rest_children;
-
-                for (const auto & arg : func_args->children)
-                {
-                    // LOG_DEBUG(&Poco::Logger::get("toDNF"), "IDs {} vs. {}", arg->getTreeHash(), (*or_child)->getTreeHash());
-
-                    if (arg->getTreeHash() != (*or_child)->getTreeHash())
-                    {
-                        rest_children.push_back(arg);
-                    }
-                }
-                if (rest_children.empty())
-                {
-                    return node;
-                }
-
-                const auto * or_child_function = (*or_child)->as<ASTFunction>();
-                if (!or_child_function)
-                {
-                    return node;
-                }
-
-                auto rest = rest_children.size() > 1 ?
-                    makeASTFunction("and", rest_children):
-                    rest_children[0];
-
-                const auto * or_child_expression_list = or_child_function->children[0]->as<ASTExpressionList>();
-                assert(or_child_expression_list);
-
-                if (or_child_expression_list)
-                {
-
-                    ASTs lst;
-                    for (const auto & arg : or_child_expression_list->children)
-                    {
-                        ASTs arg_rest_lst;
-                        arg_rest_lst.push_back(arg);
-                        arg_rest_lst.push_back(rest);
-
-                        auto and_node = makeASTFunction("and", arg_rest_lst);
-                        lst.push_back(distribute(and_node));
-                    }
-                    if (lst.empty())
-                    {
-                        return node;
-                    }
-
-                    auto ret = lst.size()>1 ?
-                        makeASTFunction("or", lst) :
-                        lst[0];
-
-                    node_added = true;
-
-                    return ret;
-                }
-            }
-            else if (function->name == "or")
-            {
-                const auto * expression_list = function->children[0]->as<ASTExpressionList>();
-                if (!expression_list)
-                {
-                    return node;
-                }
-
-                ASTs lst;
-                for (const auto & arg : expression_list->children)
-                {
-                    lst.push_back(distribute(arg));
-                }
-
-                auto ret = lst.size() > 1
-                    ? makeASTFunction("or", lst)
-                    : lst[0];
-                return ret;
-            }
-        }
-
-        return node;
-    }
-
-
-public:
-
-    void process(const ASTSelectQuery & select_query, const TablesWithColumns & tables)
-    {
-        const ASTTablesInSelectQueryElement * node = select_query.join();
-        if (!node || tables.size() < 2)
-        {
-            return;
-        }
-
-        auto & table_join = node->table_join->as<ASTTableJoin &>();
-        if (!table_join.on_expression || table_join.strictness == ASTTableJoin::Strictness::Asof)
-        {
-            return;
-        }
-
-        normTree(table_join.on_expression);
-
-        auto distributed_expression = distribute(table_join.on_expression);
-
-        normTree(distributed_expression);
-        LOG_TRACE(&Poco::Logger::get("TreeRewrite"), "bottom of toDNF:  {}, node_added {}",
-            distributed_expression->dumpTree(), node_added);
-
-        table_join.on_expression = distributed_expression;
-
-        table_join.converted_to_dnf = node_added;
-    }
-};
-
-
 /// Find the columns that are obtained by JOIN.
 void collectJoinedColumns(TableJoin & analyzed_join, const ASTTableJoin & table_join,
                           const TablesWithColumns & tables, const Aliases & aliases)
@@ -695,6 +516,8 @@ void collectJoinedColumns(TableJoin & analyzed_join, const ASTTableJoin & table_
     if (table_join.using_expression_list)
     {
         const auto & keys = table_join.using_expression_list->as<ASTExpressionList &>();
+
+        analyzed_join.addDisjunct();
         for (const auto & key : keys.children)
             analyzed_join.addUsingKey(key);
     }
@@ -703,14 +526,35 @@ void collectJoinedColumns(TableJoin & analyzed_join, const ASTTableJoin & table_
         bool is_asof = (table_join.strictness == ASTTableJoin::Strictness::Asof);
 
         CollectJoinOnKeysVisitor::Data data{analyzed_join, tables[0], tables[1], aliases, is_asof};
-        CollectJoinOnKeysVisitor(data).visit(table_join.on_expression);
+        if (auto * or_func = table_join.on_expression->as<ASTFunction>(); or_func && or_func->name == "or")
+        {
+            LOG_TRACE(&Poco::Logger::get("XXXX"), "or_func->arguments->children.size() {} / {}",
+                     or_func->arguments->children.size(), or_func->arguments->dumpTree());
+            for (auto & disjunct : or_func->arguments->children)
+            {
+                analyzed_join.addDisjunct();
+                CollectJoinOnKeysVisitor(data).visit(disjunct);
+            }
+            assert(analyzed_join.getClauses().size() == or_func->arguments->children.size());
+        }
+        else
+        {
+            analyzed_join.addDisjunct();
+            CollectJoinOnKeysVisitor(data).visit(table_join.on_expression);
+            assert(analyzed_join.oneDisjunct());
+        }
+
+        if (analyzed_join.getClauses().empty())
+                throw DB::Exception(ErrorCodes::INVALID_JOIN_ON_EXPRESSION,
+                                    "Cannot get JOIN keys from JOIN ON section: '{}'",
+                                    queryToString(table_join.on_expression));
+
         for (const auto & onexpr : analyzed_join.getClauses())
         {
             if (onexpr.key_names_left.empty())
-            {
-                throw Exception("Cannot get JOIN keys from JOIN ON section: " + queryToString(table_join.on_expression),
-                    ErrorCodes::INVALID_JOIN_ON_EXPRESSION);
-            }
+                throw DB::Exception(ErrorCodes::INVALID_JOIN_ON_EXPRESSION,
+                                    "Cannot get JOIN keys from JOIN ON section: '{}'",
+                                    queryToString(table_join.on_expression));
         }
 
         if (is_asof)
@@ -876,7 +720,7 @@ void TreeRewriterResult::collectUsedColumns(const ASTPtr & query, bool is_select
             if (required.count(name))
             {
                 /// Optimisation: do not add columns needed only in JOIN ON section.
-                if (columns_context.converted_to_dnf || columns_context.nameInclusion(name) > analyzed_join->rightKeyInclusion(name))
+                if (!analyzed_join->oneDisjunct() || columns_context.nameInclusion(name) > analyzed_join->rightKeyInclusion(name))
                     analyzed_join->addJoinedColumn(joined_column);
 
                 required.erase(name);
@@ -1114,7 +958,6 @@ TreeRewriterResultPtr TreeRewriter::analyzeSelect(
     {
         for (const auto & [name, _] : table_join->columns_from_joined_table)
             all_source_columns_set.insert(name);
-        DNF().process(*select_query, tables_with_columns);
     }
 
     normalize(query, result.aliases, all_source_columns_set, select_options.ignore_alias, settings, /* allow_self_aliases = */ true);

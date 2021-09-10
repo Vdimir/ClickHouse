@@ -179,8 +179,7 @@ private:
     NamesAndTypesList correctedColumnsAddedByJoin() const;
 
 public:
-    TableJoin() : clauses(1)
-    {}
+    TableJoin() = default;
 
     TableJoin(const Settings & settings, VolumePtr tmp_volume_);
 
@@ -235,8 +234,7 @@ public:
 
     void resetCollected();
     void addUsingKey(const ASTPtr & ast);
-    void setDisjuncts(Disjuncts &&);
-    void addDisjunct(const ASTPtr &);
+    void addDisjunct();
     void addOnKeys(ASTPtr & left_table_ast, ASTPtr & right_table_ast);
 
     /* Conditions for left/right table from JOIN ON section.

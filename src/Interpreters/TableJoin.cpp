@@ -107,8 +107,7 @@ TableJoin::TableJoin(const Settings & settings, VolumePtr tmp_volume_)
 
 void TableJoin::resetCollected()
 {
-    clauses = std::vector<JoinOnClause>(1);
-
+    clauses.clear();
     columns_from_joined_table.clear();
     columns_added_by_join.clear();
     original_names.clear();
@@ -122,28 +121,12 @@ void TableJoin::addUsingKey(const ASTPtr & ast)
     addKey(ast->getColumnName(), renamedRightColumnName(ast->getAliasOrColumnName()), ast);
 }
 
-/// create new disjunct when see a direct child of a previously discovered OR
-void TableJoin::addDisjunct(const ASTPtr & ast)
+void TableJoin::addDisjunct()
 {
-    const IAST * addr = ast.get();
+    clauses.emplace_back();
 
-    if (std::find_if(disjuncts.begin(), disjuncts.end(), [addr](const ASTPtr & ast_){return ast_.get() == addr;}) != disjuncts.end())
-    {
-        const auto & clause = clauses.back();
-        if (!clause.key_names_left.empty() || !clause.key_names_right.empty() ||
-            clause.on_filter_condition_left || clause.on_filter_condition_right)
-        {
-            clauses.emplace_back();
-        }
-    }
     if (getStorageJoin() && clauses.size() > 1)
         throw Exception("StorageJoin with ORs is not supported", ErrorCodes::NOT_IMPLEMENTED);
-}
-
-/// remember OR's children
-void TableJoin::setDisjuncts(Disjuncts&& disjuncts_)
-{
-    disjuncts = std::move(disjuncts_);
 }
 
 void TableJoin::addOnKeys(ASTPtr & left_table_ast, ASTPtr & right_table_ast)
@@ -614,7 +597,10 @@ static void addJoinConditionWithAnd(ASTPtr & current_cond, const ASTPtr & new_co
 
 void TableJoin::addJoinCondition(const ASTPtr & ast, bool is_left)
 {
-    addJoinConditionWithAnd(is_left ? clauses.back().on_filter_condition_left : clauses.back().on_filter_condition_right, ast);
+    auto & cond_ast = is_left ? clauses.back().on_filter_condition_left : clauses.back().on_filter_condition_right;
+    LOG_TRACE(&Poco::Logger::get("TableJoin"), "Adding join condition for {} table: {} to {}",
+              (is_left ? "left" : "right"), ast ? queryToString(ast) : "NULL", cond_ast ? queryToString(cond_ast) : "NULL");
+    addJoinConditionWithAnd(cond_ast, ast);
 }
 
 void TableJoin::leftToRightKeyRemap(
