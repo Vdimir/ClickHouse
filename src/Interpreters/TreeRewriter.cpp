@@ -35,7 +35,6 @@
 #include <Storages/IStorage.h>
 
 #include <AggregateFunctions/AggregateFunctionFactory.h>
-#include <Poco/Logger.h>
 
 namespace DB
 {
@@ -528,8 +527,6 @@ void collectJoinedColumns(TableJoin & analyzed_join, const ASTTableJoin & table_
         CollectJoinOnKeysVisitor::Data data{analyzed_join, tables[0], tables[1], aliases, is_asof};
         if (auto * or_func = table_join.on_expression->as<ASTFunction>(); or_func && or_func->name == "or")
         {
-            LOG_TRACE(&Poco::Logger::get("XXXX"), "or_func->arguments->children.size() {} / {}",
-                     or_func->arguments->children.size(), or_func->arguments->dumpTree());
             for (auto & disjunct : or_func->arguments->children)
             {
                 analyzed_join.addDisjunct();
