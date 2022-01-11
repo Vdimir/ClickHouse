@@ -18,9 +18,9 @@ namespace DB
 /*
  * Discover cluster nodes.
  *
- * Each node adds ephemernal node into specified path in zookeeper (each cluster have own path).
- * Also node subscribed for updates for these paths, and at each child node chanhe cluster updated.
- * When node goes down ephemernal node are destroyed, cluster configuration is updated on other node and gone node is removed from cluster.
+ * Each node adds ephemeral node into specified path in zookeeper (each cluster have own path).
+ * Also, node subscribed for updates for these paths, and at each child node chanhe cluster updated.
+ * When node goes down ephemeral node are destroyed, cluster configuration is updated on other node and gone node is removed from cluster.
  */
 class ClusterDiscovery
 {
