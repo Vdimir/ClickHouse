@@ -53,7 +53,10 @@ public:
     String getShardName() const { return shard_name; }
     String getReplicaName() const { return replica_name; }
     String getFullReplicaName() const;
-    static std::pair<String, String> parseFullReplicaName(const String & name);
+    String getFullReplicaAndDatabaseName() const;
+
+    static void parseFullReplicaAndDatabaseName(const String & name, String & out_shard, String & out_replica, String & out_database);
+    static std::pair<String, String> parseFullReplicaName(const String & name, size_t pos = 0);
 
     /// Returns cluster consisting of database replicas
     ClusterPtr getCluster() const;
@@ -84,7 +87,7 @@ private:
     String readMetadataFile(const String & table_name) const;
 
     ClusterPtr getClusterImpl() const;
-    void setCluster(ClusterPtr && new_cluster);
+    void resetCluster();
 
     void createEmptyLogEntry(const ZooKeeperPtr & current_zookeeper);
 

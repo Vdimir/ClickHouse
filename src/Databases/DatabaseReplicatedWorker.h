@@ -25,7 +25,7 @@ public:
 
     String enqueueQuery(DDLLogEntry & entry) override;
 
-    String tryEnqueueAndExecuteEntry(DDLLogEntry & entry, ContextPtr query_context);
+    String tryEnqueueAndExecuteEntry(DDLLogEntry & entry, ContextPtr query_context, DatabaseReplicated & database);
 
     void shutdown() override;
 
@@ -34,12 +34,14 @@ public:
 
 private:
     bool initializeMainThread() override;
-    void initializeReplication();
 
     DDLTaskPtr initAndCheckTask(const String & entry_name, String & out_reason, const ZooKeeperPtr & zookeeper) override;
     bool canRemoveQueueEntry(const String & entry_name, const Coordination::Stat & stat) override;
 
-    DatabaseReplicated * const database;
+    String replica_path;
+    String zookeeper_path;
+    std::vector<DatabaseReplicated * const> databases;
+
     mutable std::mutex mutex;
     std::condition_variable wait_current_task_change;
     String current_task;

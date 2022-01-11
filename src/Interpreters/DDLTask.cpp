@@ -333,11 +333,12 @@ String DDLTask::getShardID() const
     return res;
 }
 
-DatabaseReplicatedTask::DatabaseReplicatedTask(const String & name, const String & path, DatabaseReplicated * database_)
+DatabaseReplicatedTask::DatabaseReplicatedTask(const String & name, const String & path, DatabaseReplicated * database_, bool is_initial_query_)
     : DDLTaskBase(name, path)
     , database(database_)
 {
-    host_id_str = database->getFullReplicaName();
+    host_id_str = database->getFullReplicaAndDatabaseName();
+    is_initial_query = is_initial_query_;
 }
 
 String DatabaseReplicatedTask::getShardID() const

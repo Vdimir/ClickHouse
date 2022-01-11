@@ -19,7 +19,9 @@ namespace ErrorCodes
 
 DatabaseReplicatedDDLWorker::DatabaseReplicatedDDLWorker(DatabaseReplicated * db, ContextPtr context_)
     : DDLWorker(/* pool_size */ 1, db->zookeeper_path + "/log", context_, nullptr, {}, fmt::format("DDLWorker({})", db->getDatabaseName()))
-    , database(db)
+    , replica_path(db->replica_path)
+    , zookeeper_path(db->zookeeper_path)
+    , databases({db})
 {
     /// Pool size must be 1 to avoid reordering of log entries.
     /// TODO Make a dependency graph of DDL queries. It will allow to execute independent entries in parallel.
@@ -30,22 +32,41 @@ bool DatabaseReplicatedDDLWorker::initializeMainThread()
 {
     while (!stop_flag)
     {
-        try
-        {
-            auto zookeeper = getAndSetZooKeeper();
-            if (database->is_readonly)
-                database->tryConnectToZooKeeperAndInitDatabase(false);
-            initializeReplication();
-            initialized = true;
-            return true;
-        }
-        catch (...)
-        {
-            tryLogCurrentException(log, fmt::format("Error on initialization of {}", database->getDatabaseName()));
-            sleepForSeconds(5);
-        }
-    }
+        auto zookeeper = getAndSetZooKeeper();
 
+        UInt32 our_log_ptr = parse<UInt32>(zookeeper->get(replica_path + "/log_ptr"));
+        UInt32 max_log_ptr = parse<UInt32>(zookeeper->get(zookeeper_path + "/max_log_ptr"));
+        logs_to_keep = parse<UInt32>(zookeeper->get(zookeeper_path + "/logs_to_keep"));
+
+        bool ok = true;
+        for (auto * db : databases)
+        {
+            try
+            {
+                if (db->is_readonly)
+                    db->tryConnectToZooKeeperAndInitDatabase(false);
+
+                /// Check if we need to recover replica.
+                /// Invariant: replica is lost if it's log_ptr value is less then max_log_ptr - logs_to_keep.
+                if (our_log_ptr == 0 || our_log_ptr + logs_to_keep < max_log_ptr)
+                    db->recoverLostReplica(zookeeper, our_log_ptr, max_log_ptr);
+                else
+                    last_skipped_entry_name.emplace(DDLTaskBase::getLogEntryName(our_log_ptr));
+            }
+            catch (...)
+            {
+                ok = false;
+                tryLogCurrentException(log, fmt::format("Error on initialization of {}", db->getDatabaseName()));
+            }
+        }
+        if (!ok)
+        {
+            sleepForSeconds(5);
+            continue; // while (!stop_flag)
+        }
+        initialized = true;
+        return true;
+    }
     return false;
 }
 
@@ -55,30 +76,13 @@ void DatabaseReplicatedDDLWorker::shutdown()
     wait_current_task_change.notify_all();
 }
 
-void DatabaseReplicatedDDLWorker::initializeReplication()
+String DatabaseReplicatedDDLWorker::enqueueQuery(DDLLogEntry &)
 {
-    /// Check if we need to recover replica.
-    /// Invariant: replica is lost if it's log_ptr value is less then max_log_ptr - logs_to_keep.
-
-    auto zookeeper = getAndSetZooKeeper();
-    String log_ptr_str = zookeeper->get(database->replica_path + "/log_ptr");
-    UInt32 our_log_ptr = parse<UInt32>(log_ptr_str);
-    UInt32 max_log_ptr = parse<UInt32>(zookeeper->get(database->zookeeper_path + "/max_log_ptr"));
-    logs_to_keep = parse<UInt32>(zookeeper->get(database->zookeeper_path + "/logs_to_keep"));
-    if (our_log_ptr == 0 || our_log_ptr + logs_to_keep < max_log_ptr)
-        database->recoverLostReplica(zookeeper, our_log_ptr, max_log_ptr);
-    else
-        last_skipped_entry_name.emplace(DDLTaskBase::getLogEntryName(our_log_ptr));
-}
-
-String DatabaseReplicatedDDLWorker::enqueueQuery(DDLLogEntry & entry)
-{
-    auto zookeeper = getAndSetZooKeeper();
-    return enqueueQueryImpl(zookeeper, entry, database);
+    throw Exception(ErrorCodes::LOGICAL_ERROR, "DatabaseReplicatedDDLWorker::enqueueQuery is not allowed");
 }
 
 String DatabaseReplicatedDDLWorker::enqueueQueryImpl(const ZooKeeperPtr & zookeeper, DDLLogEntry & entry,
-                               DatabaseReplicated * const database, bool committed)
+                                                     DatabaseReplicated * const database, bool committed)
 {
     const String query_path_prefix = database->zookeeper_path + "/log/query-";
 
@@ -118,9 +122,9 @@ String DatabaseReplicatedDDLWorker::enqueueQueryImpl(const ZooKeeperPtr & zookee
     ops.emplace_back(zkutil::makeCreateRequest(node_path, entry.toString(), zkutil::CreateMode::Persistent));
     /// '/try' will be replaced with '/committed' or will be removed due to expired session or other error
     if (committed)
-        ops.emplace_back(zkutil::makeCreateRequest(node_path + "/committed", database->getFullReplicaName(), zkutil::CreateMode::Persistent));
+        ops.emplace_back(zkutil::makeCreateRequest(node_path + "/committed", database->getFullReplicaAndDatabaseName(), zkutil::CreateMode::Persistent));
     else
-        ops.emplace_back(zkutil::makeCreateRequest(node_path + "/try", database->getFullReplicaName(), zkutil::CreateMode::Ephemeral));
+        ops.emplace_back(zkutil::makeCreateRequest(node_path + "/try", database->getFullReplicaAndDatabaseName(), zkutil::CreateMode::Ephemeral));
     /// We don't need it anymore
     ops.emplace_back(zkutil::makeRemoveRequest(counter_path, -1));
     /// Unlock counters
@@ -134,23 +138,23 @@ String DatabaseReplicatedDDLWorker::enqueueQueryImpl(const ZooKeeperPtr & zookee
     return node_path;
 }
 
-String DatabaseReplicatedDDLWorker::tryEnqueueAndExecuteEntry(DDLLogEntry & entry, ContextPtr query_context)
+String DatabaseReplicatedDDLWorker::tryEnqueueAndExecuteEntry(DDLLogEntry & entry, ContextPtr query_context, DatabaseReplicated & db)
 {
     /// NOTE Possibly it would be better to execute initial query on the most up-to-date node,
     /// but it requires more complex logic around /try node.
 
     auto zookeeper = getAndSetZooKeeper();
-    UInt32 our_log_ptr = parse<UInt32>(zookeeper->get(database->replica_path + "/log_ptr"));
-    UInt32 max_log_ptr = parse<UInt32>(zookeeper->get(database->zookeeper_path + "/max_log_ptr"));
+    UInt32 our_log_ptr = parse<UInt32>(zookeeper->get(db.replica_path + "/log_ptr"));
+    UInt32 max_log_ptr = parse<UInt32>(zookeeper->get(db.zookeeper_path + "/max_log_ptr"));
     assert(our_log_ptr <= max_log_ptr);
-    if (database->db_settings.max_replication_lag_to_enqueue < max_log_ptr - our_log_ptr)
+    if (db.db_settings.max_replication_lag_to_enqueue < max_log_ptr - our_log_ptr)
         throw Exception(ErrorCodes::NOT_A_LEADER, "Cannot enqueue query on this replica, "
                         "because it has replication lag of {} queries. Try other replica.", max_log_ptr - our_log_ptr);
 
-    String entry_path = enqueueQuery(entry);
+    String entry_path = enqueueQueryImpl(zookeeper, entry, &db);
     auto try_node = zkutil::EphemeralNodeHolder::existing(entry_path + "/try", *zookeeper);
     String entry_name = entry_path.substr(entry_path.rfind('/') + 1);
-    auto task = std::make_unique<DatabaseReplicatedTask>(entry_name, entry_path, database);
+    auto task = std::make_unique<DatabaseReplicatedTask>(entry_name, entry_path, &db);
     task->entry = entry;
     task->parseQueryFromEntry(context);
     assert(!task->entry.query.empty());
@@ -199,7 +203,7 @@ DDLTaskPtr DatabaseReplicatedDDLWorker::initAndCheckTask(const String & entry_na
         }
     }
 
-    UInt32 our_log_ptr = parse<UInt32>(zookeeper->get(fs::path(database->replica_path) / "log_ptr"));
+    UInt32 our_log_ptr = parse<UInt32>(zookeeper->get(fs::path(replica_path) / "log_ptr"));
     UInt32 entry_num = DatabaseReplicatedTask::getLogEntryNumber(entry_name);
 
     if (entry_num <= our_log_ptr)
@@ -209,7 +213,7 @@ DDLTaskPtr DatabaseReplicatedDDLWorker::initAndCheckTask(const String & entry_na
     }
 
     String entry_path = fs::path(queue_dir) / entry_name;
-    auto task = std::make_unique<DatabaseReplicatedTask>(entry_name, entry_path, database);
+    std::unique_ptr<DatabaseReplicatedTask> task = nullptr;
 
     String initiator_name;
     zkutil::EventPtr wait_committed_or_failed = std::make_shared<Poco::Event>();
@@ -217,12 +221,26 @@ DDLTaskPtr DatabaseReplicatedDDLWorker::initAndCheckTask(const String & entry_na
     String try_node_path = fs::path(entry_path) / "try";
     if (zookeeper->tryGet(try_node_path, initiator_name, nullptr, wait_committed_or_failed))
     {
-        task->is_initial_query = initiator_name == task->host_id_str;
+        String database_name;
+        String shard_name;
+        String replica_name;
+        DatabaseReplicated::parseFullReplicaAndDatabaseName(initiator_name, database_name, shard_name, replica_name);
+
+        // TODO (@vdimir): replace `databases` with map?
+        auto database_it = std::find_if(
+            databases.begin(), databases.end(),
+            [&database_name](DatabaseReplicated * const db) { return toString(db->getUUID()) == database_name; });
+
+        if (database_it == databases.end())
+            throw DB::Exception(ErrorCodes::LOGICAL_ERROR, "Database '{}' is not served by this worker", database_name);
+
+        task = std::make_unique<DatabaseReplicatedTask>(
+            entry_name, entry_path, *database_it, /* is_initial_query_ */ initiator_name == task->host_id_str);
 
         /// Query is not committed yet. We cannot just skip it and execute next one, because reordering may break replication.
         LOG_TRACE(log, "Waiting for initiator {} to commit or rollback entry {}", initiator_name, entry_path);
         constexpr size_t wait_time_ms = 1000;
-        size_t max_iterations = database->db_settings.wait_entry_commited_timeout_sec;
+        size_t max_iterations = (*database_it)->db_settings.wait_entry_commited_timeout_sec;
         size_t iteration = 0;
 
         while (!wait_committed_or_failed->tryWait(wait_time_ms))
@@ -255,7 +273,7 @@ DDLTaskPtr DatabaseReplicatedDDLWorker::initAndCheckTask(const String & entry_na
         }
     }
 
-    if (!zookeeper->exists(fs::path(entry_path) / "committed"))
+    if (!task || !zookeeper->exists(fs::path(entry_path) / "committed"))
     {
         out_reason = fmt::format("Entry {} hasn't been committed", entry_name);
         return {};
@@ -281,7 +299,7 @@ DDLTaskPtr DatabaseReplicatedDDLWorker::initAndCheckTask(const String & entry_na
     if (task->entry.query.empty())
     {
         /// Some replica is added or removed, let's update cached cluster
-        database->setCluster(database->getClusterImpl());
+        task->database->resetCluster();
         out_reason = fmt::format("Entry {} is a dummy task", entry_name);
         return {};
     }
@@ -300,7 +318,7 @@ DDLTaskPtr DatabaseReplicatedDDLWorker::initAndCheckTask(const String & entry_na
 bool DatabaseReplicatedDDLWorker::canRemoveQueueEntry(const String & entry_name, const Coordination::Stat &)
 {
     UInt32 entry_number = DDLTaskBase::getLogEntryNumber(entry_name);
-    UInt32 max_log_ptr = parse<UInt32>(getAndSetZooKeeper()->get(fs::path(database->zookeeper_path) / "max_log_ptr"));
+    UInt32 max_log_ptr = parse<UInt32>(getAndSetZooKeeper()->get(fs::path(zookeeper_path) / "max_log_ptr"));
     return entry_number + logs_to_keep < max_log_ptr;
 }
 

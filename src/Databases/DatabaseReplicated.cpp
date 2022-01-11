@@ -95,11 +95,26 @@ String DatabaseReplicated::getFullReplicaName() const
     return shard_name + '|' + replica_name;
 }
 
-std::pair<String, String> DatabaseReplicated::parseFullReplicaName(const String & name)
+String DatabaseReplicated::getFullReplicaAndDatabaseName() const
+{
+    return toString(db_uuid) + '|' + shard_name + '|' + replica_name;
+}
+
+void DatabaseReplicated::parseFullReplicaAndDatabaseName(
+    const String & name, String & out_shard, String & out_replica, String & out_database)
+{
+    auto pos = name.find('|');
+    if (pos == std::string::npos)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Incorrect replica identifier: {}", name);
+    out_database = name.substr(0, pos);
+    std::tie(out_shard, out_replica) = parseFullReplicaName(name, pos + 1);
+}
+
+std::pair<String, String> DatabaseReplicated::parseFullReplicaName(const String & name, size_t start_pos)
 {
     String shard;
     String replica;
-    auto pos = name.find('|');
+    auto pos = name.find('|', start_pos);
     if (pos == std::string::npos || name.find('|', pos + 1) != std::string::npos)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Incorrect replica identifier: {}", name);
     shard = name.substr(0, pos);
@@ -117,10 +132,10 @@ ClusterPtr DatabaseReplicated::getCluster() const
     return cluster;
 }
 
-void DatabaseReplicated::setCluster(ClusterPtr && new_cluster)
+void DatabaseReplicated::resetCluster()
 {
     std::lock_guard lock{mutex};
-    cluster = std::move(new_cluster);
+    cluster = getClusterImpl();
 }
 
 ClusterPtr DatabaseReplicated::getClusterImpl() const
@@ -457,7 +472,7 @@ BlockIO DatabaseReplicated::tryEnqueueReplicatedDDL(const ASTPtr & query, Contex
     entry.query = queryToString(query);
     entry.initiator = ddl_worker->getCommonHostID();
     entry.setSettingsIfRequired(query_context);
-    String node_path = ddl_worker->tryEnqueueAndExecuteEntry(entry, query_context);
+    String node_path = ddl_worker->tryEnqueueAndExecuteEntry(entry, query_context, *this);
 
     Strings hosts_to_wait = getZooKeeper()->getChildren(zookeeper_path + "/replicas");
     return getDistributedDDLStatus(node_path, entry, query_context, hosts_to_wait);

@@ -140,7 +140,7 @@ private:
 
 struct DatabaseReplicatedTask : public DDLTaskBase
 {
-    DatabaseReplicatedTask(const String & name, const String & path, DatabaseReplicated * database_);
+    DatabaseReplicatedTask(const String & name, const String & path, DatabaseReplicated * database_, bool is_initial_query_ = false);
 
     String getShardID() const override;
     void parseQueryFromEntry(ContextPtr context) override;
