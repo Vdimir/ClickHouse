@@ -5,6 +5,7 @@ namespace DB
 {
 
 class DatabaseReplicated;
+using DatabaseReplicatedRawPtr = DatabaseReplicated *;
 
 /// It's similar to DDLWorker, but has the following differences:
 /// 1. DDL queue in ZooKeeper is not shared between multiple clusters and databases,
@@ -23,6 +24,9 @@ class DatabaseReplicatedDDLWorker : public DDLWorker
 public:
     DatabaseReplicatedDDLWorker(DatabaseReplicated * db, ContextPtr context_);
 
+    using DatabaseFactory = std::function<DatabaseReplicatedRawPtr(const String &)>;
+    DatabaseReplicatedDDLWorker(DatabaseFactory db_factory, ContextPtr context_, const String & replica_path_, const String & zookeeper_path_);
+
     String enqueueQuery(DDLLogEntry & entry) override;
 
     String tryEnqueueAndExecuteEntry(DDLLogEntry & entry, ContextPtr query_context, DatabaseReplicated & database);
@@ -30,9 +34,13 @@ public:
     void shutdown() override;
 
     static String enqueueQueryImpl(const ZooKeeperPtr & zookeeper, DDLLogEntry & entry,
-                                   DatabaseReplicated * const database, bool committed = false);
+                                   DatabaseReplicated * database, bool committed = false);
+
 
 private:
+    DatabaseReplicated * findDatabase(const String & database_uuid);
+
+    bool initDatabase(DatabaseReplicated * db, const ZooKeeperPtr & zk, UInt32 our_log_ptr, UInt32 max_log_ptr);
     bool initializeMainThread() override;
 
     DDLTaskPtr initAndCheckTask(const String & entry_name, String & out_reason, const ZooKeeperPtr & zookeeper) override;
@@ -40,7 +48,8 @@ private:
 
     String replica_path;
     String zookeeper_path;
-    std::vector<DatabaseReplicated * const> databases;
+    std::vector<DatabaseReplicatedRawPtr> databases;
+    DatabaseFactory database_factory = nullptr;
 
     mutable std::mutex mutex;
     std::condition_variable wait_current_task_change;

@@ -16,9 +16,13 @@
 
 #include <Core/ServerUUID.h>
 
+#include <Databases/DatabaseReplicated.h>
+#include <Databases/DatabaseReplicatedWorker.h>
+
 #include <Interpreters/Cluster.h>
 #include <Interpreters/ClusterDiscovery.h>
 #include <Interpreters/Context.h>
+#include <Interpreters/DatabaseCatalog.h>
 
 #include <Poco/Exception.h>
 #include <Poco/JSON/JSON.h>
@@ -30,6 +34,7 @@ namespace DB
 
 namespace ErrorCodes
 {
+    extern const int DATABASE_ALREADY_EXISTS;
     extern const int LOGICAL_ERROR;
 }
 
@@ -39,6 +44,44 @@ namespace
 fs::path getShardsListPath(const String & zk_root)
 {
     return fs::path(zk_root + "/shards");
+}
+
+fs::path getDatabasePath(const String & zk_root, const String & db_name)
+{
+    return fs::path(zk_root) / "databases" / db_name;
+}
+
+UUID getDatabaseUUID(zkutil::ZooKeeperPtr & zk, const String & zk_root, const String & db_name, bool allow_create = true)
+{
+    String data;
+
+    fs::path node_path = getDatabasePath(zk_root, db_name) / "uuid";
+
+    bool ok = zk->tryGet(node_path, data);
+    if (ok)
+    {
+        return parseFromString<UUID>(data);
+    }
+
+    if (allow_create)
+    {
+        zk->createAncestors(node_path);
+
+        UUID new_uuid = UUIDHelpers::generateV4();
+        auto code = zk->tryCreate(node_path, toString(new_uuid), zkutil::CreateMode::Persistent);
+        if (code == Coordination::Error::ZOK)
+        {
+            return new_uuid;
+        }
+        if (code == Coordination::Error::ZNODEEXISTS)
+        {
+            /// Someone else created database UUID, let's read it
+            return getDatabaseUUID(zk, zk_root, db_name, false);
+        }
+
+        throw Coordination::Exception(code, node_path);
+    }
+    throw Coordination::Exception(Coordination::Error::ZNODEEXISTS, node_path);
 }
 
 }
@@ -126,7 +169,8 @@ ClusterDiscovery::ClusterDiscovery(
                 /* zk_root_= */ config.getString(prefix + ".path"),
                 /* port= */ context->getTCPPort(),
                 /* secure= */ config.getBool(prefix + ".secure", false),
-                /* shard_id= */ config.getUInt(prefix + ".shard", 0)
+                /* shard_id= */ config.getUInt(prefix + ".shard", 0),
+                /* cluster_= */ nullptr
             )
         );
     }
@@ -240,6 +284,31 @@ ClusterPtr ClusterDiscovery::makeCluster(const ClusterInfo & cluster_info)
     return cluster;
 }
 
+std::shared_ptr<DatabaseReplicated> ClusterDiscovery::createDB(zkutil::ZooKeeperPtr zk, const String & db_name, const ClusterInfo & cluster_info)
+{
+    UUID db_uuid = getDatabaseUUID(zk, cluster_info.zk_root, db_name);
+
+    fs::path metadata_path = fs::canonical(context->getPath());
+    metadata_path = metadata_path / "store" / DatabaseCatalog::getPathForUUID(db_uuid);
+
+    if (fs::exists(metadata_path))
+        throw Exception(ErrorCodes::DATABASE_ALREADY_EXISTS, "Metadata directory {} already exists", metadata_path.string());
+    auto db = std::make_shared<DatabaseReplicated>(
+        db_name,
+        metadata_path,
+        db_uuid,
+        getDatabasePath(cluster_info.zk_root, db_name) / "data",
+        toString(cluster_info.current_node.shard_id),
+        current_node_name,
+        DatabaseReplicatedSettings(),
+        context,
+        ddl_workers[cluster_info.name],
+        cluster_info.cluster);
+    DatabaseCatalog::instance().attachDatabase(db_name, db);
+    return db;
+}
+
+
 /// Reads data from zookeeper and tries to update cluster.
 /// Returns true on success (or no update required).
 bool ClusterDiscovery::updateCluster(ClusterInfo & cluster_info)
@@ -285,8 +354,10 @@ bool ClusterDiscovery::updateCluster(ClusterInfo & cluster_info)
 
     LOG_DEBUG(log, "Updating system.clusters record for '{}' with {} nodes", cluster_info.name, cluster_info.nodes_info.size());
 
-    auto cluster = makeCluster(cluster_info);
-    context->setCluster(cluster_info.name, cluster);
+    cluster_info.cluster = makeCluster(cluster_info);
+    context->setCluster(cluster_info.name, cluster_info.cluster);
+    createDB(zk, "somedb", cluster_info);
+
     return true;
 }
 
@@ -306,6 +377,19 @@ void ClusterDiscovery::initialUpdate()
     auto zk = context->getZooKeeper();
     for (auto & [_, info] : clusters_info)
     {
+        /// TODO (vdimir@): make sure that paths are consistent
+        auto zk_path = fs::path(info.zk_root) / "worker";
+        auto replica_path = zk_path / "replicas"/ (toString(info.current_node.shard_id) + "|" + current_node_name);
+        auto ddl_worker = std::make_shared<DatabaseReplicatedDDLWorker>(
+            [this, cluster_info=info](const String & name)
+            {
+                /// TODO (@vdimir) do not use raw ptr for db ?
+                return this->createDB(this->context->getZooKeeper(), name, cluster_info).get();
+            },
+            context, replica_path, zk_path);
+        ddl_worker->startup();
+        ddl_workers.emplace(info.name, std::move(ddl_worker));
+
         registerInZk(zk, info);
         if (!updateCluster(info))
         {

@@ -28,6 +28,39 @@ DatabaseReplicatedDDLWorker::DatabaseReplicatedDDLWorker(DatabaseReplicated * db
     /// We also need similar graph to load tables on server startup in order of topsort.
 }
 
+DatabaseReplicatedDDLWorker::DatabaseReplicatedDDLWorker(DatabaseFactory db_factory,
+                                                         ContextPtr context_,
+                                                         const String & replica_path_,
+                                                         const String & zookeeper_path_)
+    : DDLWorker(/* pool_size */ 1, zookeeper_path_ + "/log", context_, nullptr, {}, "DatabaseReplicatedDDLWorker")
+    , replica_path(replica_path_)
+    , zookeeper_path(zookeeper_path_)
+    , database_factory(db_factory)
+{
+}
+
+bool DatabaseReplicatedDDLWorker::initDatabase(DatabaseReplicated * db, const ZooKeeperPtr & zk, UInt32 our_log_ptr, UInt32 max_log_ptr)
+{
+    try
+    {
+        if (db->is_readonly)
+            db->tryConnectToZooKeeperAndInitDatabase(false);
+
+        /// Check if we need to recover replica.
+        /// Invariant: replica is lost if it's log_ptr value is less then max_log_ptr - logs_to_keep.
+        if (our_log_ptr == 0 || our_log_ptr + logs_to_keep < max_log_ptr)
+            db->recoverLostReplica(zk, our_log_ptr, max_log_ptr);
+        else
+            last_skipped_entry_name.emplace(DDLTaskBase::getLogEntryName(our_log_ptr));
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, fmt::format("Error on initialization of {}", db->getDatabaseName()));
+        return false;
+    }
+    return true;
+}
+
 bool DatabaseReplicatedDDLWorker::initializeMainThread()
 {
     while (!stop_flag)
@@ -41,23 +74,7 @@ bool DatabaseReplicatedDDLWorker::initializeMainThread()
         bool ok = true;
         for (auto * db : databases)
         {
-            try
-            {
-                if (db->is_readonly)
-                    db->tryConnectToZooKeeperAndInitDatabase(false);
-
-                /// Check if we need to recover replica.
-                /// Invariant: replica is lost if it's log_ptr value is less then max_log_ptr - logs_to_keep.
-                if (our_log_ptr == 0 || our_log_ptr + logs_to_keep < max_log_ptr)
-                    db->recoverLostReplica(zookeeper, our_log_ptr, max_log_ptr);
-                else
-                    last_skipped_entry_name.emplace(DDLTaskBase::getLogEntryName(our_log_ptr));
-            }
-            catch (...)
-            {
-                ok = false;
-                tryLogCurrentException(log, fmt::format("Error on initialization of {}", db->getDatabaseName()));
-            }
+            ok = ok && initDatabase(db, zookeeper, our_log_ptr, max_log_ptr);
         }
         if (!ok)
         {
@@ -82,7 +99,7 @@ String DatabaseReplicatedDDLWorker::enqueueQuery(DDLLogEntry &)
 }
 
 String DatabaseReplicatedDDLWorker::enqueueQueryImpl(const ZooKeeperPtr & zookeeper, DDLLogEntry & entry,
-                                                     DatabaseReplicated * const database, bool committed)
+                                                     DatabaseReplicated * database, bool committed)
 {
     const String query_path_prefix = database->zookeeper_path + "/log/query-";
 
@@ -192,6 +209,27 @@ String DatabaseReplicatedDDLWorker::tryEnqueueAndExecuteEntry(DDLLogEntry & entr
     return entry_path;
 }
 
+DatabaseReplicated * DatabaseReplicatedDDLWorker::findDatabase(const String & database_uuid)
+{
+    // TODO (@vdimir): replace `databases` with map?
+    auto database_it = std::find_if(
+        databases.begin(), databases.end(),
+        [&database_uuid](DatabaseReplicated * const db) { return toString(db->getUUID()) == database_uuid; });
+
+    if (database_it != databases.end())
+    {
+        return *database_it;
+    }
+    if (!database_factory)
+        throw DB::Exception(ErrorCodes::LOGICAL_ERROR, "Database '{}' is not handled by this worker", database_uuid);
+
+    auto * new_db = database_factory(database_uuid);
+    if (!new_db)
+        throw DB::Exception(ErrorCodes::LOGICAL_ERROR, "Database '{}' is not handled by this worker", database_uuid);
+    databases.push_back(new_db);
+    return new_db;
+}
+
 DDLTaskPtr DatabaseReplicatedDDLWorker::initAndCheckTask(const String & entry_name, String & out_reason, const ZooKeeperPtr & zookeeper)
 {
     {
@@ -221,26 +259,18 @@ DDLTaskPtr DatabaseReplicatedDDLWorker::initAndCheckTask(const String & entry_na
     String try_node_path = fs::path(entry_path) / "try";
     if (zookeeper->tryGet(try_node_path, initiator_name, nullptr, wait_committed_or_failed))
     {
-        String database_name;
+        String database_uuid;
         String shard_name;
         String replica_name;
-        DatabaseReplicated::parseFullReplicaAndDatabaseName(initiator_name, database_name, shard_name, replica_name);
-
-        // TODO (@vdimir): replace `databases` with map?
-        auto database_it = std::find_if(
-            databases.begin(), databases.end(),
-            [&database_name](DatabaseReplicated * const db) { return toString(db->getUUID()) == database_name; });
-
-        if (database_it == databases.end())
-            throw DB::Exception(ErrorCodes::LOGICAL_ERROR, "Database '{}' is not served by this worker", database_name);
-
+        DatabaseReplicated::parseFullReplicaAndDatabaseName(initiator_name, database_uuid, shard_name, replica_name);
+        auto * db = findDatabase(database_uuid);
         task = std::make_unique<DatabaseReplicatedTask>(
-            entry_name, entry_path, *database_it, /* is_initial_query_ */ initiator_name == task->host_id_str);
+            entry_name, entry_path, db, /* is_initial_query_ */ initiator_name == task->host_id_str);
 
         /// Query is not committed yet. We cannot just skip it and execute next one, because reordering may break replication.
         LOG_TRACE(log, "Waiting for initiator {} to commit or rollback entry {}", initiator_name, entry_path);
         constexpr size_t wait_time_ms = 1000;
-        size_t max_iterations = (*database_it)->db_settings.wait_entry_commited_timeout_sec;
+        size_t max_iterations = db->db_settings.wait_entry_commited_timeout_sec;
         size_t iteration = 0;
 
         while (!wait_committed_or_failed->tryWait(wait_time_ms))

@@ -12,6 +12,8 @@
 
 #include <unordered_map>
 
+class DatabaseReplicatedDDLWorker;
+
 namespace DB
 {
 
@@ -73,10 +75,13 @@ private:
 
         NodeInfo current_node;
 
-        explicit ClusterInfo(const String & name_, const String & zk_root_, UInt16 port, bool secure, size_t shard_id)
+        ClusterPtr cluster;
+
+        explicit ClusterInfo(const String & name_, const String & zk_root_, UInt16 port, bool secure, size_t shard_id, ClusterPtr cluster_)
             : name(name_)
             , zk_root(zk_root_)
             , current_node(getFQDNOrHostName() + ":" + toString(port), secure, shard_id)
+            , cluster(cluster_)
         {
         }
     };
@@ -93,6 +98,8 @@ private:
 
     NodesInfo getNodes(zkutil::ZooKeeperPtr & zk, const String & zk_root, const Strings & node_uuids);
 
+    std::shared_ptr<DatabaseReplicated> createDB(zkutil::ZooKeeperPtr zk, const String & db_name, const ClusterInfo & cluster_info);
+
     ClusterPtr makeCluster(const ClusterInfo & cluster_info);
 
     bool needUpdate(const Strings & node_uuids, const NodesInfo & nodes);
@@ -103,6 +110,8 @@ private:
 
     /// cluster name -> cluster info (zk root, set of nodes)
     std::unordered_map<String, ClusterInfo> clusters_info;
+    /// cluster name -> worker
+    std::unordered_map<String, std::shared_ptr<DatabaseReplicatedDDLWorker>> ddl_workers;
 
     ContextMutablePtr context;
 

@@ -90,6 +90,23 @@ DatabaseReplicated::DatabaseReplicated(
         zookeeper_path = "/" + zookeeper_path;
 }
 
+DatabaseReplicated::DatabaseReplicated(
+    const String & name_,
+    const String & metadata_path_,
+    UUID uuid,
+    const String & zookeeper_path_,
+    const String & shard_name_,
+    const String & replica_name_,
+    DatabaseReplicatedSettings db_settings_,
+    ContextPtr context_,
+    ReplicatedDDLWorkerPtr ddl_worker_,
+    ClusterPtr cluster_)
+    : DatabaseReplicated(name_, metadata_path_, uuid, zookeeper_path_, shard_name_, replica_name_, db_settings_,  context_)
+{
+    ddl_worker = ddl_worker_;
+    parent_cluster = cluster_;
+}
+
 String DatabaseReplicated::getFullReplicaName() const
 {
     return shard_name + '|' + replica_name;
@@ -124,6 +141,9 @@ std::pair<String, String> DatabaseReplicated::parseFullReplicaName(const String 
 
 ClusterPtr DatabaseReplicated::getCluster() const
 {
+    if (parent_cluster)
+        return {};
+
     std::lock_guard lock{mutex};
     if (cluster)
         return cluster;
@@ -134,6 +154,9 @@ ClusterPtr DatabaseReplicated::getCluster() const
 
 void DatabaseReplicated::resetCluster()
 {
+    if (parent_cluster)
+        return;
+
     std::lock_guard lock{mutex};
     cluster = getClusterImpl();
 }
@@ -356,8 +379,11 @@ void DatabaseReplicated::loadStoredObjects(
 void DatabaseReplicated::startupTables(ThreadPool & thread_pool, bool force_restore, bool force_attach)
 {
     DatabaseAtomic::startupTables(thread_pool, force_restore, force_attach);
-    ddl_worker = std::make_unique<DatabaseReplicatedDDLWorker>(this, getContext());
-    ddl_worker->startup();
+    if (!ddl_worker)
+    {
+        ddl_worker = std::make_unique<DatabaseReplicatedDDLWorker>(this, getContext());
+        ddl_worker->startup();
+    }
 }
 
 void DatabaseReplicated::checkQueryValid(const ASTPtr & query, ContextPtr query_context) const

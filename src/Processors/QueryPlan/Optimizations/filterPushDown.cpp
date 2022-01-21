@@ -42,16 +42,12 @@ static size_t tryAddNewFilterStep(
     const auto & filter_column_name = filter->getFilterColumnName();
     bool removes_filter = filter->removesFilterColumn();
 
-    // std::cerr << "Filter: \n" << expression->dumpDAG() << std::endl;
-
     const auto & all_inputs = child->getInputStreams().front().header.getColumnsWithTypeAndName();
 
     auto split_filter = expression->cloneActionsForFilterPushDown(filter_column_name, removes_filter, allowed_inputs, all_inputs);
+    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{} split_filter {}", __FILE_NAME__, __LINE__, split_filter ? "TRUE" : "FALSE");
     if (!split_filter)
         return 0;
-
-    // std::cerr << "===============\n" << expression->dumpDAG() << std::endl;
-    // std::cerr << "---------------\n" << split_filter->dumpDAG() << std::endl;
 
     const auto * filter_node = expression->tryFindInIndex(filter_column_name);
     if (!filter_node && !removes_filter)
@@ -188,13 +184,13 @@ size_t tryPushDownFilter(QueryPlan::Node * parent_node, QueryPlan::Nodes & nodes
             return updated_steps;
     }
 
-    if (auto * join = typeid_cast<JoinStep *>(child.get()))
+    if (const auto * join = typeid_cast<JoinStep *>(child.get()))
     {
         const auto & table_join  = join->getJoin()->getTableJoin();
         /// Push down is for left table only. We need to update JoinStep for push down into right.
         /// Only inner and left join are supported. Other types may generate default values for left table keys.
         /// So, if we push down a condition like `key != 0`, not all rows may be filtered.
-        if (table_join.oneDisjunct() && (table_join.kind() == ASTTableJoin::Kind::Inner || table_join.kind() == ASTTableJoin::Kind::Left))
+        if (table_join.oneDisjunct() && isInnerOrLeft(table_join.kind()))
         {
             const auto & left_header = join->getInputStreams().front().header;
             const auto & res_header = join->getOutputStream().header;
@@ -213,9 +209,26 @@ size_t tryPushDownFilter(QueryPlan::Node * parent_node, QueryPlan::Nodes & nodes
 
                 allowed_keys.push_back(name);
             }
+            LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{} tryAddNewFilterStep parent {}: {}", __FILE_NAME__, __LINE__,
+                     parent_node->step->getName(), parent_node->step->getStepDescription());
+            size_t i = 0;
+            for (const auto & node : nodes)
+            {
+                LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{} tryAddNewFilterStep child[{}] {}: {}", __FILE_NAME__, __LINE__,
+                          i++, node.step->getName(), node.step->getStepDescription());
+            }
 
-            if (auto updated_steps = tryAddNewFilterStep(parent_node, nodes, allowed_keys))
+            size_t updated_steps = tryAddNewFilterStep(parent_node, nodes, allowed_keys);
+            LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{} updated_steps {}", __FILE_NAME__, __LINE__, updated_steps);
+            if (updated_steps)
+            {
+                for (const auto & node : nodes)
+                {
+                    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{} AFTER UPDATE child[{}] {}: {}", __FILE_NAME__, __LINE__,
+                              i++, node.step->getName(), node.step->getStepDescription());
+                }
                 return updated_steps;
+            }
         }
     }
 

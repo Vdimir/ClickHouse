@@ -39,6 +39,8 @@ void StorageSystemClusters::fillData(MutableColumns & res_columns, ContextPtr co
     {
         if (const auto * replicated = typeid_cast<const DatabaseReplicated *>(name_and_database.second.get()))
         {
+            if (replicated->managedExternally())
+                continue;
             // A quick fix for stateless tests with DatabaseReplicated. Its ZK
             // node can be destroyed at any time. If another test lists
             // system.clusters to get client command line suggestions, it will

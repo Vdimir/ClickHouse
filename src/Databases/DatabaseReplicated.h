@@ -16,6 +16,7 @@ using ZooKeeperPtr = std::shared_ptr<zkutil::ZooKeeper>;
 
 class Cluster;
 using ClusterPtr = std::shared_ptr<Cluster>;
+using ReplicatedDDLWorkerPtr = std::shared_ptr<DatabaseReplicatedDDLWorker>;
 
 class DatabaseReplicated : public DatabaseAtomic
 {
@@ -24,6 +25,11 @@ public:
                        const String & zookeeper_path_, const String & shard_name_, const String & replica_name_,
                        DatabaseReplicatedSettings db_settings_,
                        ContextPtr context);
+
+    DatabaseReplicated(const String & name_, const String & metadata_path_, UUID uuid,
+                       const String & zookeeper_path_, const String & shard_name_, const String & replica_name_,
+                       DatabaseReplicatedSettings db_settings_,
+                       ContextPtr context, ReplicatedDDLWorkerPtr ddl_worker_, ClusterPtr cluster_);
 
     ~DatabaseReplicated() override;
 
@@ -73,6 +79,8 @@ public:
 
     friend struct DatabaseReplicatedTask;
     friend class DatabaseReplicatedDDLWorker;
+    bool managedExternally() const { return parent_cluster != nullptr; }
+
 private:
     void tryConnectToZooKeeperAndInitDatabase(bool force_attach);
     bool createDatabaseNodesInZooKeeper(const ZooKeeperPtr & current_zookeeper);
@@ -100,10 +108,11 @@ private:
     zkutil::ZooKeeperPtr getZooKeeper() const;
 
     std::atomic_bool is_readonly = true;
-    std::unique_ptr<DatabaseReplicatedDDLWorker> ddl_worker;
+    ReplicatedDDLWorkerPtr ddl_worker = nullptr;
     UInt32 max_log_ptr_at_creation = 0;
 
     mutable ClusterPtr cluster;
+    ClusterPtr parent_cluster = nullptr; /// Set if cluster managed externally, not by database itself
 };
 
 }
