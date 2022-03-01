@@ -268,3 +268,6 @@
 [submodule "contrib/eigen"]
 	path = contrib/eigen
 	url = https://github.com/eigen-mirror/eigen
+[submodule "contrib/pybind11"]
+	path = contrib/pybind11
+	url = git@github.com:pybind/pybind11.git
